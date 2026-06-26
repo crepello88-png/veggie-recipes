@@ -130,6 +130,29 @@
   }
   .fab:hover{transform:scale(1.05)}
   .fab:active{transform:scale(0.95)}
+  .fab-url{
+    bottom:calc(max(env(safe-area-inset-bottom),20px) + 70px);
+    background:rgba(255,255,255,0.08);
+    backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+    border:1px solid var(--border-strong);
+    color:var(--text);
+    box-shadow:0 6px 20px rgba(0,0,0,0.4);
+    font-size:22px;
+  }
+  .fab-url:hover{background:rgba(255,255,255,0.14)}
+  .url-info{
+    font-size:12px;color:var(--text-faint);line-height:1.6;
+    padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:10px;
+    border:1px solid var(--border);
+    margin-top:4px;
+  }
+  .url-status{
+    margin-top:12px;font-size:13px;color:var(--text-dim);
+    min-height:20px;
+  }
+  .url-status.loading::before{content:"⏳ ";}
+  .url-status.error{color:var(--danger)}
+  .url-status.success{color:var(--accent)}
   /* Modal */
   .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:50;display:none;align-items:flex-end;justify-content:center;padding:0}
   .modal-bg.show{display:flex;animation:fadein .2s}
@@ -270,7 +293,33 @@
   </div>
 </div>
 
+<button class="fab fab-url" id="urlBtn" title="URL から追加">⇪</button>
 <button class="fab" id="addBtn" title="レシピを追加">+</button>
+
+<!-- URL Import Modal -->
+<div class="modal-bg" id="urlModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 class="modal-title">URL から取り込み</h2>
+      <button class="icon-btn" id="urlClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>レシピサイトの URL</label>
+        <input id="urlInput" placeholder="https://cookpad.com/recipe/..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="url-info">
+        対応サイト: クックパッド / DELISH KITCHEN / kurashiru / 楽天レシピ / NHK / 白ごはん.com 等<br>
+        Schema.org Recipe 対応サイトなら自動取り込み可能。
+      </div>
+      <div id="urlStatus" class="url-status"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="urlCancel">キャンセル</button>
+      <button class="btn" id="urlFetch">取り込み</button>
+    </div>
+  </div>
+</div>
 
 <!-- Edit Modal -->
 <div class="modal-bg" id="editModal">
@@ -632,7 +681,228 @@ function closeDetail(){
   detailId = null;
 }
 
+// ============ URL Import ============
+const CORS_PROXIES = [
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchViaProxies(targetUrl){
+  for(const buildUrl of CORS_PROXIES){
+    try{
+      const resp = await fetch(buildUrl(targetUrl), {method:'GET'});
+      if(!resp.ok) continue;
+      const text = await resp.text();
+      if(text && text.length > 100) return text;
+    }catch(e){
+      // try next
+    }
+  }
+  throw new Error('全 CORS proxy 失敗');
+}
+
+function extractJsonLdRecipe(html){
+  // Extract all JSON-LD scripts
+  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while((match = re.exec(html)) !== null){
+    try{
+      const txt = match[1].trim();
+      const data = JSON.parse(txt);
+      // data could be object or array
+      const items = Array.isArray(data) ? data : [data];
+      for(const item of items){
+        // single Recipe
+        if(item && item['@type'] === 'Recipe') return item;
+        // graph
+        if(item && Array.isArray(item['@graph'])){
+          for(const node of item['@graph']){
+            if(node && node['@type'] === 'Recipe') return node;
+          }
+        }
+      }
+    }catch(e){
+      // try next script
+    }
+  }
+  return null;
+}
+
+function extractOgImage(html){
+  const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+  return m ? m[1] : null;
+}
+function extractTitle(html){
+  const m = html.match(/<title>([\s\S]*?)<\/title>/i);
+  return m ? m[1].trim() : '';
+}
+
+function normalizeText(s){
+  if(s == null) return '';
+  if(Array.isArray(s)) s = s.join(' ');
+  return String(s).replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+}
+
+function parseRecipe(recipe, html){
+  // recipe = Schema.org Recipe JSON-LD object
+  const out = {
+    title:'', ingredients:[], steps:[], photo:null, time:null,
+  };
+  out.title = normalizeText(recipe.name) || extractTitle(html).split(/[|｜\-—]/)[0].trim();
+
+  // ingredients
+  let ing = recipe.recipeIngredient || recipe.ingredients || [];
+  if(typeof ing === 'string') ing = ing.split('\n');
+  out.ingredients = (Array.isArray(ing) ? ing : []).map(normalizeText).filter(Boolean);
+
+  // steps: recipeInstructions can be string / array of HowToStep / array of strings
+  const inst = recipe.recipeInstructions;
+  if(typeof inst === 'string'){
+    out.steps = inst.split(/\n+/).map(normalizeText).filter(Boolean);
+  }else if(Array.isArray(inst)){
+    for(const step of inst){
+      if(typeof step === 'string'){
+        out.steps.push(normalizeText(step));
+      }else if(step && typeof step === 'object'){
+        // HowToStep / HowToSection
+        if(step['@type'] === 'HowToSection' && Array.isArray(step.itemListElement)){
+          for(const sub of step.itemListElement){
+            const t = sub.text || sub.name;
+            if(t) out.steps.push(normalizeText(t));
+          }
+        }else{
+          const t = step.text || step.name || step.description;
+          if(t) out.steps.push(normalizeText(t));
+        }
+      }
+    }
+    out.steps = out.steps.filter(Boolean);
+  }
+
+  // image
+  let img = recipe.image;
+  if(Array.isArray(img)) img = img[0];
+  if(img && typeof img === 'object') img = img.url || img.contentUrl;
+  if(!img) img = extractOgImage(html);
+  out.photo = img || null;
+
+  // time: parse ISO 8601 duration (PT30M, PT1H, PT1H30M)
+  const parseDur = d => {
+    if(!d) return null;
+    const m = String(d).match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+    if(!m) return null;
+    return (parseInt(m[1]||0)*60) + parseInt(m[2]||0);
+  };
+  out.time = parseDur(recipe.totalTime) || parseDur(recipe.cookTime);
+
+  return out;
+}
+
+async function downloadImage(url){
+  // Try to fetch image and convert to data URL
+  for(const buildUrl of CORS_PROXIES){
+    try{
+      const resp = await fetch(buildUrl(url));
+      if(!resp.ok) continue;
+      const blob = await resp.blob();
+      if(blob.size < 100) continue;
+      // resize to fit
+      return await new Promise((resolve, reject)=>{
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = new Image();
+          img.onload = () => {
+            const ratio = Math.min(1, 800/img.width);
+            const w = img.width*ratio, h = img.height*ratio;
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            cv.getContext('2d').drawImage(img, 0, 0, w, h);
+            resolve(cv.toDataURL('image/jpeg', 0.8));
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }catch(e){}
+  }
+  return null;
+}
+
+function setUrlStatus(msg, cls){
+  const el = $('#urlStatus');
+  el.className = 'url-status' + (cls?' '+cls:'');
+  el.textContent = msg;
+}
+
+async function importFromUrl(){
+  const url = $('#urlInput').value.trim();
+  if(!url){ setUrlStatus('URL を入力してください', 'error'); return; }
+  if(!/^https?:\/\//.test(url)){ setUrlStatus('http(s):// で始まる URL を入力', 'error'); return; }
+
+  setUrlStatus('ページ取得中…', 'loading');
+  let html;
+  try{
+    html = await fetchViaProxies(url);
+  }catch(e){
+    setUrlStatus('ページ取得失敗。CORS proxy が応答しません', 'error');
+    return;
+  }
+  setUrlStatus('レシピ情報を解析中…', 'loading');
+
+  const recipe = extractJsonLdRecipe(html);
+  if(!recipe){
+    setUrlStatus('Schema.org Recipe が見つかりません。手動入力で', 'error');
+    return;
+  }
+  const parsed = parseRecipe(recipe, html);
+  if(!parsed.title || parsed.ingredients.length === 0){
+    setUrlStatus('解析できる情報が不足。手動入力で', 'error');
+    return;
+  }
+
+  // Open edit modal with pre-filled data
+  closeUrlModal();
+  openEdit(null);
+  $('#fTitle').value = parsed.title;
+  $('#fIng').value = parsed.ingredients.join('\n');
+  $('#fSteps').value = parsed.steps.join('\n');
+  if(parsed.time) $('#fTime').value = parsed.time;
+
+  // Try image download (async, non-blocking for modal)
+  if(parsed.photo){
+    setUrlStatus('画像取得中…', 'loading');
+    const dataUrl = await downloadImage(parsed.photo);
+    if(dataUrl){
+      editingPhoto = dataUrl;
+      refreshPhotoPreview();
+    }
+  }
+  toast('取り込み完了、保存ボタンで追加');
+}
+
+function openUrlModal(){
+  $('#urlInput').value = '';
+  setUrlStatus('', '');
+  $('#urlModal').classList.add('show');
+  setTimeout(()=>$('#urlInput').focus(),100);
+}
+function closeUrlModal(){
+  $('#urlModal').classList.remove('show');
+}
+
 // ============ Events ============
+$('#urlBtn').onclick = openUrlModal;
+$('#urlClose').onclick = closeUrlModal;
+$('#urlCancel').onclick = closeUrlModal;
+$('#urlFetch').onclick = importFromUrl;
+$('#urlInput').onkeydown = e => { if(e.key==='Enter') importFromUrl(); };
+$('#urlModal').addEventListener('click', e => {
+  if(e.target.id==='urlModal') closeUrlModal();
+});
+
 $('#addBtn').onclick = () => openEdit(null);
 $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
