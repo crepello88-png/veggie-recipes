@@ -959,24 +959,36 @@ async function importFromUrl(){
     return;
   }
 
-  // Open edit modal with pre-filled data
-  closeUrlModal();
-  openEdit(null);
-  $('#fTitle').value = parsed.title;
-  $('#fIng').value = parsed.ingredients.join('\n');
-  $('#fSteps').value = parsed.steps.join('\n');
-  if(parsed.time) $('#fTime').value = parsed.time;
-
-  // Try image download (async, non-blocking for modal)
+  // 画像取得 (時間かかる場合あり、ここで取得しておく)
+  let photoData = null;
   if(parsed.photo){
     setUrlStatus('画像取得中…', 'loading');
-    const dataUrl = await downloadImage(parsed.photo);
-    if(dataUrl){
-      editingPhoto = dataUrl;
-      refreshPhotoPreview();
-    }
+    photoData = await downloadImage(parsed.photo);
   }
-  toast('取り込み完了、保存ボタンで追加');
+
+  // 野菜タグ自動抽出
+  const ingText = parsed.ingredients.join(' ');
+  const tags = extractTags(ingText);
+
+  // 自動保存
+  state.recipes.push({
+    id: uid(),
+    title: parsed.title,
+    ingredients: parsed.ingredients,
+    steps: parsed.steps,
+    tags: tags,
+    photo: photoData,
+    time: parsed.time || null,
+    difficulty: 0,
+    sourceUrl: url,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  save();
+  render();
+
+  setUrlStatus('保存しました', 'success');
+  setTimeout(()=>{ closeUrlModal(); toast(`「${parsed.title}」を保存`); }, 700);
 }
 
 function openUrlModal(){
