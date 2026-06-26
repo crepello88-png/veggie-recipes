@@ -280,9 +280,7 @@
 
   <div class="tags-section">
     <div class="tags-label">野菜タグ</div>
-    <div class="tags" id="tagBar">
-      <button class="tag-clear" id="clearTagsBtn" style="display:none">タグ解除</button>
-    </div>
+    <div class="tags" id="tagBar"></div>
   </div>
 
   <div class="grid" id="recipeGrid"></div>
@@ -423,6 +421,26 @@ function load(){
     if(raw){
       const d = JSON.parse(raw);
       state.recipes = d.recipes || [];
+      // Auto-migrate: 既存 tag を canonical 形に正規化
+      let migrated = 0;
+      state.recipes.forEach(r => {
+        const ingText = (r.ingredients||[]).join(' ');
+        const auto = extractTags(ingText);
+        // 手動追加タグも保持しつつ、自動部分を新方式に置き換える
+        const manual = (r.tags||[]).filter(t => {
+          // canonical 名でない (= ユーザー手動 tag) はそのまま残す
+          return !VEG_DICT.some(([c, vars]) => c===t || vars.includes(t));
+        });
+        const newTags = Array.from(new Set([...auto, ...manual]));
+        if(JSON.stringify(newTags.sort()) !== JSON.stringify((r.tags||[]).slice().sort())){
+          r.tags = newTags;
+          migrated++;
+        }
+      });
+      if(migrated > 0){
+        save();
+        console.log(`Migrated ${migrated} recipes to new tag format`);
+      }
     }
   }catch(e){console.warn('load failed',e)}
 }
@@ -469,27 +487,95 @@ function resizeImage(file, maxW=800){
   });
 }
 
-// 野菜タグ自動抽出 (材料 text から)
+// 野菜タグ辞書: [標準表記, [異表記...]]
+// canonical name にまとめる (= ジャガイモ, じゃがいも, 馬鈴薯 → "ジャガイモ" タグ)
 const VEG_DICT = [
-  'ジャガイモ','じゃがいも','玉ねぎ','たまねぎ','タマネギ','にんじん','ニンジン','人参','大根','だいこん',
-  'キャベツ','レタス','白菜','はくさい','ほうれん草','ほうれんそう','小松菜','こまつな','チンゲンサイ',
-  'ブロッコリー','カリフラワー','アスパラ','アスパラガス','ピーマン','パプリカ','なす','茄子','ナス',
-  'トマト','プチトマト','きゅうり','キュウリ','胡瓜','ゴーヤ','かぼちゃ','カボチャ','ズッキーニ',
-  'インゲン','いんげん','インゲン豆','えんどう豆','エンドウ豆','枝豆','えだまめ','そら豆','ソラマメ',
-  'にら','ニラ','ねぎ','ネギ','長ねぎ','長ネギ','青ねぎ','万能ねぎ','にんにく','ニンニク','生姜','しょうが','ショウガ',
-  'もやし','モヤシ','れんこん','レンコン','蓮根','ごぼう','ゴボウ','牛蒡','里芋','さといも','さつまいも','サツマイモ',
-  'しいたけ','椎茸','しめじ','シメジ','えのき','エノキ','まいたけ','マイタケ','エリンギ','なめこ','ナメコ',
-  'セロリ','春菊','しゅんぎく','三つ葉','水菜','みずな','大葉','おおば','青じそ',
-  'とうもろこし','コーン','スイートコーン','オクラ','みょうが','ミョウガ','うど','ウド','たけのこ','タケノコ','竹の子',
-  '豆苗','とうみょう','空芯菜','カイワレ','貝割れ','スプラウト','クレソン',
+  ['ジャガイモ',['じゃがいも','馬鈴薯','メークイン']],
+  ['玉ねぎ',['たまねぎ','タマネギ','玉葱']],
+  ['にんじん',['ニンジン','人参','胡蘿蔔']],
+  ['大根',['だいこん','ダイコン']],
+  ['キャベツ',[]],
+  ['レタス',['サニーレタス']],
+  ['白菜',['はくさい','ハクサイ']],
+  ['ほうれん草',['ほうれんそう','ホウレンソウ','法蓮草']],
+  ['小松菜',['こまつな','コマツナ']],
+  ['チンゲン菜',['チンゲンサイ','青梗菜']],
+  ['ブロッコリー',[]],
+  ['カリフラワー',[]],
+  ['アスパラガス',['アスパラ']],
+  ['ピーマン',[]],
+  ['パプリカ',[]],
+  ['なす',['茄子','ナス']],
+  ['トマト',['プチトマト','ミニトマト','とまと']],
+  ['きゅうり',['キュウリ','胡瓜']],
+  ['ゴーヤ',['苦瓜']],
+  ['かぼちゃ',['カボチャ','南瓜']],
+  ['ズッキーニ',[]],
+  ['いんげん',['インゲン','インゲン豆','さやいんげん','サヤインゲン']],
+  ['えんどう豆',['エンドウ豆','スナップエンドウ','絹さや','きぬさや']],
+  ['枝豆',['えだまめ','エダマメ']],
+  ['そら豆',['ソラマメ','空豆','蚕豆']],
+  ['にら',['ニラ','韮']],
+  ['長ねぎ',['長ネギ','白ねぎ','白ネギ']],
+  ['青ねぎ',['万能ねぎ','小ねぎ','青ネギ','万能ネギ']],
+  ['ねぎ',['ネギ','葱']],
+  ['にんにく',['ニンニク','大蒜','ガーリック']],
+  ['生姜',['しょうが','ショウガ','ジンジャー']],
+  ['もやし',['モヤシ','豆もやし']],
+  ['れんこん',['レンコン','蓮根']],
+  ['ごぼう',['ゴボウ','牛蒡']],
+  ['里芋',['さといも','サトイモ']],
+  ['さつまいも',['サツマイモ','薩摩芋']],
+  ['しいたけ',['シイタケ','椎茸']],
+  ['しめじ',['シメジ','本しめじ','ブナしめじ']],
+  ['えのき',['エノキ','榎茸']],
+  ['まいたけ',['マイタケ','舞茸']],
+  ['エリンギ',[]],
+  ['なめこ',['ナメコ']],
+  ['マッシュルーム',['マッシュ']],
+  ['セロリ',[]],
+  ['春菊',['しゅんぎく','シュンギク']],
+  ['三つ葉',['みつば','ミツバ']],
+  ['水菜',['みずな','ミズナ']],
+  ['大葉',['おおば','青じそ','青紫蘇','しそ','シソ']],
+  ['とうもろこし',['コーン','スイートコーン']],
+  ['オクラ',[]],
+  ['みょうが',['ミョウガ','茗荷']],
+  ['たけのこ',['タケノコ','筍','竹の子']],
+  ['豆苗',['とうみょう']],
+  ['カイワレ',['貝割れ','かいわれ']],
+  ['スプラウト',[]],
+  ['クレソン',[]],
+  ['空芯菜',['くうしんさい']],
+  ['アボカド',[]],
+  ['長芋',['ながいも','ナガイモ','山芋','やまいも','ヤマイモ']],
 ];
+
 function extractTags(ingText){
-  const found = new Set();
-  for(const v of VEG_DICT){
-    if(ingText.includes(v)) found.add(v);
+  const matched = new Set();
+  // 長い表記から優先 (e.g., "長ねぎ" を "ねぎ" より優先)
+  // 各 canonical について、表記のいずれかが含まれていれば canonical を 1 つだけ追加
+  // ただし「長ねぎ」が含まれてれば「ねぎ」は追加しない
+  const ranked = VEG_DICT
+    .map(([canon, variants]) => ({canon, all:[canon, ...variants]}))
+    .sort((a,b) => {
+      // 一番長い表記が長い方が優先
+      const maxA = Math.max(...a.all.map(s=>s.length));
+      const maxB = Math.max(...b.all.map(s=>s.length));
+      return maxB - maxA;
+    });
+  let txt = ingText;
+  for(const {canon, all} of ranked){
+    for(const v of all){
+      if(txt.includes(v)){
+        matched.add(canon);
+        // 「長ねぎ」マッチ後、残りの判定で短い「ねぎ」が同じ箇所にヒットしないよう除去
+        txt = txt.split(v).join(' ');
+        break;
+      }
+    }
   }
-  // Normalize: same vegetable across notations -> first match wins
-  return Array.from(found);
+  return Array.from(matched);
 }
 
 // ============ Render ============
@@ -505,15 +591,18 @@ function renderTags(){
     (r.tags||[]).forEach(t=>{counts[t]=(counts[t]||0)+1});
   });
   const bar = $('#tagBar');
-  // Keep clear button (first child)
-  const clearBtn = $('#clearTagsBtn');
   bar.innerHTML='';
+
+  // Clear button (再生成、毎回 fresh)
   if(state.activeTags.size>0){
-    clearBtn.style.display='';
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'tag-clear';
+    clearBtn.id = 'clearTagsBtn';
+    clearBtn.textContent = 'タグ解除';
+    clearBtn.onclick = () => { state.activeTags.clear(); render(); };
     bar.appendChild(clearBtn);
-  }else{
-    clearBtn.style.display='none';
   }
+
   const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
   sorted.forEach(([t,n])=>{
     const el = document.createElement('button');
@@ -526,6 +615,13 @@ function renderTags(){
     };
     bar.appendChild(el);
   });
+
+  if(sorted.length === 0 && state.activeTags.size === 0){
+    const hint = document.createElement('span');
+    hint.style.cssText = 'color:var(--text-faint);font-size:12px;padding:7px 0;';
+    hint.textContent = 'レシピを追加するとここにタグが表示されます';
+    bar.appendChild(hint);
+  }
 }
 
 function matchRecipe(r){
@@ -956,8 +1052,6 @@ $('#editSave').onclick = () => {
   render();
   toast('保存しました');
 };
-
-$('#clearTagsBtn').onclick = () => { state.activeTags.clear(); render(); };
 
 $('#searchInput').oninput = e => { state.query = e.target.value; renderGrid(); updateStats(); };
 
