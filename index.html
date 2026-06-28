@@ -271,6 +271,7 @@
         <span class="search-icon">⌕</span>
         <input id="searchInput" placeholder="レシピを探す... 材料・タイトル・手順から">
       </div>
+      <button class="btn btn-ghost" id="syncBtn" title="クラウド同期 (GitHub)">☁</button>
       <button class="btn btn-ghost" id="exportBtn" title="JSON で保存">↧</button>
       <button class="btn btn-ghost" id="importBtn" title="JSON 読込">↥</button>
       <input type="file" id="importFile" accept=".json" style="display:none">
@@ -293,6 +294,43 @@
 
 <button class="fab fab-url" id="urlBtn" title="URL から追加">⇪</button>
 <button class="fab" id="addBtn" title="レシピを追加">+</button>
+
+<!-- Cloud Sync Modal -->
+<div class="modal-bg" id="syncModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 class="modal-title">☁ クラウド同期 設定</h2>
+      <button class="icon-btn" id="syncClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>GitHub Personal Access Token (PAT)</label>
+        <input type="password" id="syncPat" placeholder="ghp_xxxxxxxxxx" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="url-info">
+        <strong>初回 setup (5 分):</strong><br>
+        1. <a href="https://github.com/settings/tokens/new?scopes=gist&description=Veggie+Recipes+Sync" target="_blank" style="color:var(--accent);">こちらをクリック</a> (= GitHub PAT 作成画面)<br>
+        2. Expiration を「No expiration」or 長め に設定<br>
+        3. 「Generate token」クリック<br>
+        4. 出てきた token (= ghp_ で始まる) をコピー<br>
+        5. 上の欄に貼り付け → 保存<br>
+        <br>
+        <strong>2 台目以降の端末:</strong><br>
+        同じ PAT を入力 + Gist ID 入力で 同じデータに繋がる
+      </div>
+      <div class="field">
+        <label>Gist ID <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--text-faint)">(2 台目以降、または既存 Gist 使用時)</span></label>
+        <input id="syncGistId" placeholder="例: abc123def456..." autocomplete="off" spellcheck="false">
+      </div>
+      <div id="syncStatus" class="url-status"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="syncCancel">キャンセル</button>
+      <button class="btn btn-ghost" id="syncPullBtn">⬇ クラウドから取得</button>
+      <button class="btn" id="syncSaveBtn">保存 + 同期</button>
+    </div>
+  </div>
+</div>
 
 <!-- URL Import Modal -->
 <div class="modal-bg" id="urlModal">
@@ -446,6 +484,107 @@ function load(){
 }
 function save(){
   localStorage.setItem(KEY, JSON.stringify({recipes:state.recipes}));
+  // GitHub sync (debounced)
+  scheduleCloudSync();
+}
+
+// ============ GitHub Gist Cloud Sync ============
+const SYNC_KEY = 'veggie_sync_config';
+let syncTimer = null;
+
+function getSyncConfig(){
+  try{
+    const raw = localStorage.getItem(SYNC_KEY);
+    if(raw) return JSON.parse(raw);
+  }catch(e){}
+  return {pat:'', gistId:'', enabled:false};
+}
+function setSyncConfig(c){
+  localStorage.setItem(SYNC_KEY, JSON.stringify(c));
+}
+
+function scheduleCloudSync(){
+  const cfg = getSyncConfig();
+  if(!cfg.enabled || !cfg.pat) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(()=>cloudPush(false), 3000); // 3 秒後に push (debounce)
+}
+
+async function cloudPush(silent){
+  const cfg = getSyncConfig();
+  if(!cfg.enabled || !cfg.pat) return;
+  const payload = {recipes: state.recipes, _updatedAt: Date.now()};
+  const body = {
+    description: 'Veggie Recipe Book - data sync',
+    public: false,
+    files: {'veggie-recipes.json': {content: JSON.stringify(payload, null, 2)}},
+  };
+  try{
+    let resp;
+    if(cfg.gistId){
+      // Update existing
+      resp = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${cfg.pat}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+    }else{
+      // Create new
+      resp = await fetch('https://api.github.com/gists', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${cfg.pat}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+    }
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const result = await resp.json();
+    if(!cfg.gistId){
+      cfg.gistId = result.id;
+      setSyncConfig(cfg);
+    }
+    if(!silent) toast('☁ クラウド保存完了');
+    return true;
+  }catch(e){
+    if(!silent) toast('☁ 同期失敗: ' + e.message);
+    console.warn('cloudPush failed', e);
+    return false;
+  }
+}
+
+async function cloudPull(silent){
+  const cfg = getSyncConfig();
+  if(!cfg.enabled || !cfg.pat || !cfg.gistId) return false;
+  try{
+    const resp = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
+      headers: {
+        'Authorization': `Bearer ${cfg.pat}`,
+        'Accept': 'application/vnd.github+json',
+      },
+    });
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const gist = await resp.json();
+    const fileData = gist.files['veggie-recipes.json'];
+    if(!fileData) throw new Error('file not found in gist');
+    const payload = JSON.parse(fileData.content);
+    if(!payload.recipes) throw new Error('no recipes');
+    state.recipes = payload.recipes;
+    save();
+    render();
+    if(!silent) toast(`☁ クラウドから ${payload.recipes.length} 件 読込`);
+    return true;
+  }catch(e){
+    if(!silent) toast('☁ 取得失敗: ' + e.message);
+    console.warn('cloudPull failed', e);
+    return false;
+  }
 }
 
 // ============ Helpers ============
@@ -1138,9 +1277,86 @@ $('#detailModal').addEventListener('click', e => {
   if(e.target.id==='detailModal') closeDetail();
 });
 
+// ============ Sync Modal Events ============
+function openSyncModal(){
+  const cfg = getSyncConfig();
+  $('#syncPat').value = cfg.pat || '';
+  $('#syncGistId').value = cfg.gistId || '';
+  $('#syncStatus').className = 'url-status';
+  $('#syncStatus').textContent = cfg.enabled ? '☁ 有効: 自動同期中' : '未設定';
+  $('#syncModal').classList.add('show');
+}
+function closeSyncModal(){
+  $('#syncModal').classList.remove('show');
+}
+
+$('#syncBtn').onclick = openSyncModal;
+$('#syncClose').onclick = closeSyncModal;
+$('#syncCancel').onclick = closeSyncModal;
+$('#syncModal').addEventListener('click', e => {
+  if(e.target.id==='syncModal') closeSyncModal();
+});
+
+$('#syncSaveBtn').onclick = async () => {
+  const pat = $('#syncPat').value.trim();
+  const gistId = $('#syncGistId').value.trim();
+  if(!pat){
+    $('#syncStatus').textContent = 'PAT を入力してください';
+    $('#syncStatus').className = 'url-status error';
+    return;
+  }
+  const cfg = {pat, gistId, enabled: true};
+  setSyncConfig(cfg);
+  $('#syncStatus').textContent = '☁ 同期中…';
+  $('#syncStatus').className = 'url-status loading';
+  const ok = await cloudPush(true);
+  if(ok){
+    $('#syncStatus').textContent = '☁ 設定完了、自動同期開始';
+    $('#syncStatus').className = 'url-status success';
+    toast('☁ 自動同期 有効化');
+    setTimeout(closeSyncModal, 1500);
+  }else{
+    $('#syncStatus').textContent = '☁ 同期失敗、PAT 確認してください';
+    $('#syncStatus').className = 'url-status error';
+  }
+};
+
+$('#syncPullBtn').onclick = async () => {
+  const pat = $('#syncPat').value.trim();
+  const gistId = $('#syncGistId').value.trim();
+  if(!pat || !gistId){
+    $('#syncStatus').textContent = 'PAT と Gist ID 両方必要です';
+    $('#syncStatus').className = 'url-status error';
+    return;
+  }
+  // 一時的に config に入れる
+  const cfg = {pat, gistId, enabled: true};
+  setSyncConfig(cfg);
+  $('#syncStatus').textContent = '☁ 取得中…';
+  $('#syncStatus').className = 'url-status loading';
+  const ok = await cloudPull(true);
+  if(ok){
+    $('#syncStatus').textContent = '☁ 取得完了';
+    $('#syncStatus').className = 'url-status success';
+    toast('☁ クラウドから取得完了');
+    setTimeout(closeSyncModal, 1500);
+  }else{
+    $('#syncStatus').textContent = '☁ 取得失敗、PAT/Gist ID 確認';
+    $('#syncStatus').className = 'url-status error';
+  }
+};
+
 // ============ Init ============
 load();
 render();
+
+// 起動時にクラウドから自動取得 (= 設定されてれば)
+(async () => {
+  const cfg = getSyncConfig();
+  if(cfg.enabled && cfg.pat && cfg.gistId){
+    await cloudPull(true);
+  }
+})();
 
 // PWA support
 if('serviceWorker' in navigator){
