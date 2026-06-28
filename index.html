@@ -513,6 +513,11 @@ function scheduleCloudSync(){
 async function cloudPush(silent){
   const cfg = getSyncConfig();
   if(!cfg.enabled || !cfg.pat) return;
+  // 安全策: state.recipes が空なら警告 + 保護
+  if(!state.recipes || state.recipes.length === 0){
+    if(!silent) toast('⚠ レシピが空、push 中止 (= データ保護)');
+    return false;
+  }
   const payload = {recipes: state.recipes, _updatedAt: Date.now()};
   const body = {
     description: 'Veggie Recipe Book - data sync',
@@ -575,6 +580,21 @@ async function cloudPull(silent){
     if(!fileData) throw new Error('file not found in gist');
     const payload = JSON.parse(fileData.content);
     if(!payload.recipes) throw new Error('no recipes');
+
+    // 安全策: cloud が空で local にある場合 → 上書きしない (= データ保護)
+    const cloudCount = payload.recipes.length;
+    const localCount = state.recipes.length;
+    if(cloudCount === 0 && localCount > 0){
+      if(!silent) toast(`⚠ クラウドは空 (local ${localCount}件あり)、保護のため取得中止`);
+      return false;
+    }
+    // 安全策: cloud に少ない data がある場合 → 確認 dialog
+    if(cloudCount < localCount && localCount > 0 && !silent){
+      const ok = confirm(`クラウド: ${cloudCount}件 / ローカル: ${localCount}件\n` +
+                          `ローカルの方が多いです。クラウドで上書きしますか?`);
+      if(!ok) return false;
+    }
+
     state.recipes = payload.recipes;
     save();
     render();
